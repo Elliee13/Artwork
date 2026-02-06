@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+httpx
+openpyxl
+pillow
+pydantic-settings
