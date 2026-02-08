@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import posixpath
 import re
-import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from io import BytesIO
@@ -52,6 +52,8 @@ class CatalogService:
     def __init__(self, settings: Settings, graph_client: GraphClient | None) -> None:
         self.settings = settings
         self.graph_client = graph_client
+        self.cache_root = Path(tempfile.gettempdir()) / "artwork_cache"
+        self.cache_root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _safe_sheet_dir_name(sheet_name: str) -> str:
@@ -76,6 +78,13 @@ class CatalogService:
     def _save_as_png(image_bytes: bytes, output_path: Path) -> None:
         with Image.open(BytesIO(image_bytes)) as img:
             img.save(output_path, format="PNG")
+
+    @staticmethod
+    def _to_png_bytes(image_bytes: bytes) -> bytes:
+        with Image.open(BytesIO(image_bytes)) as img:
+            output = BytesIO()
+            img.save(output, format="PNG")
+        return output.getvalue()
 
     @staticmethod
     def _should_ignore_sheet(sheet_name: str) -> bool:
@@ -276,13 +285,73 @@ class CatalogService:
 
         return await self.graph_client.download_excel_file()
 
+    @staticmethod
+    def _parse_filename_index(filename: str) -> int | None:
+        match = re.fullmatch(r"img_(\d+)\.png", filename)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def _resolve_sheet_by_category(self, workbook, category: str):
+        used_sheet_dirs: set[str] = set()
+
+        for worksheet in workbook.worksheets:
+            if self._should_ignore_sheet(worksheet.title):
+                continue
+
+            safe_sheet_name = self._resolve_unique_dir_name(
+                self._safe_sheet_dir_name(worksheet.title),
+                used_sheet_dirs,
+            )
+            if safe_sheet_name == category:
+                return worksheet
+
+        return None
+
+    def _cache_path(self, category: str, filename: str) -> Path:
+        return self.cache_root / category / filename
+
+    async def get_media_image(self, category: str, filename: str) -> bytes:
+        image_index = self._parse_filename_index(filename)
+        if image_index is None:
+            raise FileNotFoundError("Invalid media filename.")
+
+        cache_path = self._cache_path(category, filename)
+        if cache_path.exists() and cache_path.is_file():
+            return cache_path.read_bytes()
+
+        workbook_bytes = await self._load_workbook_bytes()
+        workbook = load_workbook(filename=BytesIO(workbook_bytes), data_only=True)
+
+        try:
+            worksheet = self._resolve_sheet_by_category(workbook, category)
+            if worksheet is None:
+                raise FileNotFoundError("Unknown media category.")
+
+            images = getattr(worksheet, "_images", [])
+            if image_index < 1 or image_index > len(images):
+                raise FileNotFoundError("Image index out of range.")
+
+            raw_bytes = images[image_index - 1]._data()
+            png_bytes = self._to_png_bytes(raw_bytes)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Image extraction failed for {category}/{filename}: {exc}") from exc
+        finally:
+            close = getattr(workbook, "close", None)
+            if callable(close):
+                close()
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(png_bytes)
+        return png_bytes
+
     async def build_catalog(self) -> list[dict[str, object]]:
         workbook_bytes = await self._load_workbook_bytes()
         package_diagnostics_by_sheet, unmapped_media_count = self._analyze_xlsx_package(workbook_bytes)
 
-        if self.settings.media_dir.exists():
-            shutil.rmtree(self.settings.media_dir)
-        self.settings.media_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_root.mkdir(parents=True, exist_ok=True)
 
         workbook = load_workbook(filename=BytesIO(workbook_bytes), data_only=True)
         categories: list[dict[str, object]] = []
@@ -297,7 +366,7 @@ class CatalogService:
                 self._safe_sheet_dir_name(worksheet.title),
                 used_sheet_dirs,
             )
-            sheet_dir = self.settings.media_dir / safe_sheet_name
+            sheet_dir = self.cache_root / safe_sheet_name
             sheet_dir.mkdir(parents=True, exist_ok=True)
 
             diagnostics = package_diagnostics_by_sheet.get(worksheet.title, SheetDiagnostics())
@@ -311,7 +380,7 @@ class CatalogService:
                     output_path = sheet_dir / f"img_{idx}.png"
                     raw_bytes = image._data()
                     self._save_as_png(raw_bytes, output_path)
-                    image_urls.append(f"/static/media/{quote(safe_sheet_name)}/img_{idx}.png")
+                    image_urls.append(f"/api/media/{quote(safe_sheet_name)}/img_{idx}.png")
                 except Exception as exc:
                     diagnostics.extraction_failures += 1
                     logger.warning(

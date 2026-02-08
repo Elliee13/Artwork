@@ -68,3 +68,15 @@ async def get_catalog() -> CatalogResponse:
         return CatalogResponse(categories=categories)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Catalog generation failed: {exc}") from exc
+
+
+@app.get("/media/{category}/{filename}")
+@app.get("/api/media/{category}/{filename}", include_in_schema=False)
+async def get_media(category: str, filename: str) -> Response:
+    try:
+        image_bytes = await catalog_service.get_media_image(category=category, filename=filename)
+        return Response(content=image_bytes, media_type="image/png")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Media retrieval failed: {exc}") from exc
