@@ -89,6 +89,7 @@ const Masonry: React.FC<MasonryProps> = ({
   blurToFocus = true,
   colorShiftOnHover = false
 }) => {
+  const toTranslate3d = (x: number, y: number) => `translate3d(${x}px, ${y}px, 0)`;
   const columns = useMedia(
     ['(min-width:1500px)', '(min-width:1000px)', '(min-width:600px)', '(min-width:400px)'],
     [5, 4, 3, 2],
@@ -154,13 +155,17 @@ const Masonry: React.FC<MasonryProps> = ({
   }, [columns, items, width]);
 
   const hasMounted = useRef(false);
+  const previousPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
 
   useLayoutEffect(() => {
     if (!imagesReady) return;
 
+    const selectors = gridLayout.items.map(item => `[data-key="${item.id}"]`);
+    selectors.forEach(selector => gsap.killTweensOf(selector));
+
     gridLayout.items.forEach((item, index) => {
       const selector = `[data-key="${item.id}"]`;
-      const animProps = { x: item.x, y: item.y, width: item.w, height: item.h };
+      const targetTransform = toTranslate3d(item.x, item.y);
 
       if (!hasMounted.current) {
         const start = getInitialPosition(item);
@@ -168,15 +173,12 @@ const Masonry: React.FC<MasonryProps> = ({
           selector,
             {
               opacity: 0,
-              x: start.x,
-              y: start.y,
-              width: item.w,
-              height: item.h,
+              transform: toTranslate3d(start.x, start.y),
               ...(blurToFocus && { filter: 'blur(6px)' })
           },
             {
               opacity: 1,
-              ...animProps,
+              transform: targetTransform,
               ...(blurToFocus && { filter: 'blur(0px)' }),
               duration: 0.82,
               ease: 'expo.out',
@@ -184,16 +186,33 @@ const Masonry: React.FC<MasonryProps> = ({
             }
           );
       } else {
-        gsap.to(selector, {
-          ...animProps,
-          duration,
-          ease,
-          overwrite: 'auto'
-        });
+        const previousPosition = previousPositionsRef.current[item.id];
+        if (
+          previousPosition &&
+          (previousPosition.x !== item.x || previousPosition.y !== item.y)
+        ) {
+          gsap.fromTo(
+            selector,
+            { transform: toTranslate3d(previousPosition.x, previousPosition.y) },
+            {
+              transform: targetTransform,
+              duration,
+              ease,
+              overwrite: 'auto'
+            }
+          );
+        }
       }
     });
 
+    previousPositionsRef.current = Object.fromEntries(
+      gridLayout.items.map(item => [item.id, { x: item.x, y: item.y }])
+    );
     hasMounted.current = true;
+
+    return () => {
+      selectors.forEach(selector => gsap.killTweensOf(selector));
+    };
   }, [gridLayout.items, imagesReady, stagger, initialDelay, animateFrom, blurToFocus, duration, ease]);
 
   const handleMouseEnter = (id: string, element: HTMLElement) => {
@@ -241,14 +260,21 @@ const Masonry: React.FC<MasonryProps> = ({
     window.open(url, '_blank', 'noopener');
   };
 
+  const containerHeight = gridLayout.height;
+
   return (
-    <div ref={containerRef} className="relative w-full" style={{ height: `${gridLayout.height}px` }}>
+    <div ref={containerRef} className="relative w-full" style={{ height: containerHeight }}>
       {gridLayout.items.map(item => (
         <div
           key={item.id}
           data-key={item.id}
           className={`absolute box-content ${item.url && item.url !== 'noop' ? 'cursor-pointer' : 'cursor-default'}`}
-          style={{ willChange: 'transform, width, height, opacity' }}
+          style={{
+            width: item.w,
+            height: item.h,
+            transform: toTranslate3d(item.x, item.y),
+            willChange: 'transform, opacity'
+          }}
           onClick={() => openItemUrl(item.url)}
           onMouseEnter={e => handleMouseEnter(item.id, e.currentTarget)}
           onMouseLeave={e => handleMouseLeave(item.id, e.currentTarget)}
