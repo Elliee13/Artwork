@@ -19,18 +19,21 @@ app = FastAPI(title="Artwork Viewer API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
-    allow_credentials=False,
-    allow_methods=["GET"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
+# Keep a prefixed static mount for serverless platforms that preserve `/api` in the path.
+app.mount("/api/static", StaticFiles(directory=settings.static_dir), name="api-static")
 
 graph_client = None if settings.local_xlsx_path else GraphClient(settings=settings)
 catalog_service = CatalogService(settings=settings, graph_client=graph_client)
 
 
-@app.get("/api/catalog", response_model=CatalogResponse)
+@app.get("/catalog", response_model=CatalogResponse)
+@app.get("/api/catalog", response_model=CatalogResponse, include_in_schema=False)
 async def get_catalog() -> CatalogResponse:
     try:
         categories = await catalog_service.build_catalog()

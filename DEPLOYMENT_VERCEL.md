@@ -10,7 +10,7 @@ This keeps deployment simple and preserves current architecture.
 ## 1) Backend Project (`backend/`)
 
 ### What is configured
-- FastAPI entrypoint for Vercel: `backend/app/app.py`
+- FastAPI serverless entrypoint for Vercel: `backend/api/index.py`
 - Writable runtime static directory support (`/tmp/static`) via `backend/app/config.py`
 
 ### Vercel setup
@@ -18,7 +18,7 @@ This keeps deployment simple and preserves current architecture.
 2. Select this repository.
 3. Set **Root Directory** to `backend`.
 4. Keep framework as `Other`.
-5. Deploy (Vercel auto-detects FastAPI from `app/app.py`).
+5. Deploy.
 
 ### Backend environment variables (Vercel Project Settings)
 For current local-workbook mode:
@@ -41,7 +41,7 @@ Reference template:
 3. Set **Root Directory** to `frontend`.
 4. Framework preset should detect Vite.
 5. Set env var:
-   - `VITE_API_BASE_URL=https://<your-backend-domain>.vercel.app`
+   - `VITE_API_BASE_URL=https://<your-backend-domain>.vercel.app/api`
 6. Deploy.
 
 Reference template:
@@ -58,3 +58,16 @@ Reference template:
 - The backend extracts images on demand and serves URLs under `/static/...`.
 - On Vercel, runtime files are generated in writable temp storage (`/tmp`).
 - Keep `artwork.xlsx` present in `backend/` for local-workbook mode deployment.
+
+## 5) Troubleshooting
+
+### Error: `spawn /usr/local/bin/uv ENOENT`
+If your build log shows paths like `/vercel/path0/backend/...`, Vercel is building from the repository root instead of `backend`.
+
+Fix:
+1. In the backend Vercel project, set **Root Directory** to `backend`.
+2. Make sure `backend/vercel.json` is present (it forces the stable `@vercel/python` builder path for this project layout).
+3. Redeploy with **Clear build cache**.
+
+Optional but recommended:
+- Keep `backend/.python-version` set to `3.12`.

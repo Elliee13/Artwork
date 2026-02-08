@@ -27,6 +27,6 @@ In both modes, the API parses sheets as categories, extracts embedded images, an
 ## Vercel
 
 Backend Vercel deployment is configured with:
-- `app/app.py` (FastAPI entrypoint for auto-detection)
+- `api/index.py` (Vercel serverless FastAPI entrypoint)
 
 Use root directory `backend` in Vercel and set `LOCAL_XLSX_PATH=artwork.xlsx` for v1 local-workbook mode.
