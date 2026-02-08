@@ -49,7 +49,12 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+        origins: list[str] = []
+        for origin in self.allowed_origins.split(","):
+            normalized_origin = origin.strip().rstrip("/")
+            if normalized_origin:
+                origins.append(normalized_origin)
+        return origins
 
     @model_validator(mode="after")
     def validate_workbook_source(self) -> "Settings":
