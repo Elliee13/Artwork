@@ -1,91 +1,54 @@
-# Internal Artwork Viewer - System Documentation
+# Artwork Viewer - System Documentation
 
 ## 1) Purpose
-Internal, view-only web app for browsing artwork by category.
+Internal, view-only gallery app for browsing artwork images grouped by Excel worksheet category.
 
 Core behavior:
-- Each Excel worksheet tab is a category.
-- Clicking a category shows all extracted artwork images for that sheet.
+- Each worksheet tab is treated as one category.
+- Selecting a category shows all extractable images from that worksheet.
+- No edit/upload/delete/search/auth workflows are in scope.
 
-No editing/upload/delete/search/auth flows in scope.
+## 2) Architecture
+- Frontend: React + TypeScript + Tailwind (Vite)
+- Backend: FastAPI (Vercel serverless compatible)
+- Excel parsing/extraction: `openpyxl` + `Pillow`
+- Optional remote source: Microsoft Graph API (behind source mode flag)
 
-## 2) Current Source Mode (Active Now)
-The system is currently running in **local workbook mode**.
+## 3) Source Modes
+Source selection is controlled by `SOURCE_MODE`.
 
-- Backend reads:
-  - `LOCAL_XLSX_PATH` from `backend/.env`
-- Current configured file:
-  - `C:\Users\ellie\Downloads\Artwork\backend\artwork.xlsx`
+### Local mode (default)
+- `SOURCE_MODE=local`
+- `LOCAL_XLSX_PATH=artwork.xlsx` (or absolute path)
 
-If `LOCAL_XLSX_PATH` is set, Graph API is bypassed.
-
-## 3) Future Source Mode (Graph API)
-When ready, switch to Graph mode for dynamic OneDrive/SharePoint updates.
-
-Required backend env values:
+### Graph mode (optional)
+- `SOURCE_MODE=graph`
 - `MS_TENANT_ID`
 - `MS_CLIENT_ID`
 - `MS_CLIENT_SECRET`
-- One file locator mode:
-1. `GRAPH_DRIVE_ID` + `GRAPH_ITEM_ID`
-2. `GRAPH_SITE_ID` + `GRAPH_FILE_PATH`
+- `MS_DRIVE_ID`
+- `MS_ITEM_ID`
 
-Important:
-- Use Graph IDs/path, not direct SharePoint URL parsing at runtime.
-- The share link is the business source; Graph IDs/path are the technical locator.
+Recommended Graph path pattern:
+- `GET https://graph.microsoft.com/v1.0/drives/{driveId}/items/{itemId}/content`
 
-## 4) Architecture
-### Backend (`backend/`)
-- Framework: FastAPI
-- Key files:
-  - `backend/app/main.py` - API + static mount
-  - `backend/app/config.py` - env settings + validation
-  - `backend/app/services/graph_client.py` - OAuth2 + workbook download from Graph
-  - `backend/app/services/catalog_service.py` - workbook parsing + image extraction
+## 4) Backend API
 
-Data flow:
-1. Load workbook bytes (local path or Graph).
-2. Iterate all worksheets.
-3. Skip non-intentional default sheets using rule-based filtering (for example `Sheet1`, `Sheet2`).
-4. Extract embedded images from each worksheet via `openpyxl`.
-5. Run ZIP-level diagnostics (`xl/drawings`, `xl/media`) for unsupported object visibility.
-6. Add extraction metadata per category (`images_count`, `unsupported_objects_detected`, `notes`).
-7. Emit per-sheet backend logs for extraction/debug status.
-8. Save images to:
-   - `backend/static/media/<SHEET_NAME>/img_<index>.png`
-9. Return catalog JSON with category names + static image URLs.
+### Catalog
+- Primary: `GET /catalog`
+- Compatibility alias: `GET /api/catalog`
 
-### Frontend (`frontend/`)
-- Framework: React + TypeScript + Tailwind
-- Key files:
-  - `frontend/src/pages/GalleryPage.tsx`
-  - `frontend/src/components/layout/AppLayout.tsx`
-  - `frontend/src/components/catalog/CategoryTabs.tsx`
-  - `frontend/src/components/catalog/ImageGrid.tsx`
-  - `frontend/src/components/catalog/ImageItem.tsx`
-  - `frontend/src/services/catalogApi.ts`
+Query params:
+- `refresh=1` bypasses in-process catalog cache and forces rebuild.
 
-UI behavior:
-- Fetch `/api/catalog`
-- Set first category as default active tab
-- Render one active category at a time
-- Show responsive image-only grid
-- Show loading and empty states
-
-## 5) API Contract
-### `GET /api/catalog`
-Response:
-
+Response shape (unchanged):
 ```json
 {
   "categories": [
     {
       "name": "KIDS",
-      "images": [
-        "/static/media/KIDS/img_1.png",
-        "/static/media/KIDS/img_2.png"
-      ],
-      "images_count": 2,
+      "images": ["/api/media/KIDS/img_1.png"],
+      "images_count": 1,
       "unsupported_objects_detected": false,
       "notes": null
     }
@@ -93,67 +56,123 @@ Response:
 }
 ```
 
-Static files served at:
-- `/static/...`
+### Media
+- Primary: `GET /media/{category}/{filename}`
+- Compatibility alias: `GET /api/media/{category}/{filename}`
 
-## 6) Runbook
+File guardrails:
+- `category` must match safe slug pattern.
+- `filename` must match `img_<n>.png`.
+- Invalid category/filename returns `404`.
+
+### Graph health
+- `GET /health/graph`
+- `GET /api/health/graph`
+
+Possible responses:
+- `{"mode":"local","status":"disabled"}`
+- `{"mode":"graph","status":"missing_config","missing":[...]}`
+- `{"mode":"graph","status":"ok","bytes":12345}`
+- `{"mode":"graph","status":"error","error":"..."}`
+
+## 5) Caching and Identity
+
+### Workbook identity
+A stable workbook identity is computed from:
+- workbook path
+- file `mtime_ns`
+- file size
+
+Graph mode enhancement:
+- identity may include an additional content signature (hash of first 64KB) to reduce false equivalence when rewritten.
+
+### Catalog cache
+- In-process TTL cache for catalog JSON.
+- Env: `CATALOG_CACHE_TTL_SECONDS` (default `120`; set `0` to disable cache).
+- Cache key includes `SOURCE_MODE` + workbook identity.
+- `refresh=1` always bypasses cache.
+
+Catalog response headers:
+- `Cache-Control: private, max-age=10`
+- `CDN-Cache-Control: max-age=60`
+- `X-Catalog-Cache: HIT | MISS | BYPASS`
+
+### Media cache
+- Extracted images are cached under `/tmp/artwork_cache/<category>/img_<n>.png`.
+- Sidecar metadata files (`img_<n>.meta`) store workbook identity.
+- Media ETag is based on workbook identity + filename (and file stat).
+- Conditional GET with `If-None-Match` returns `304` when applicable.
+
+Media response headers:
+- `Content-Type: image/png`
+- `Cache-Control: public, max-age=31536000, immutable`
+- `ETag: ...`
+
+### Stale media invalidation
+On catalog rebuild:
+- If workbook identity changed from the last built identity, stale media cache is invalidated.
+- Only files matching `img_<n>.png` and `img_<n>.meta` are removed.
+- Category directories are removed only when empty.
+- Invalidation is logged with old identity, new identity, cleaned category dirs, and removal counts.
+
+## 6) Logging and Observability
+- Each request gets a generated request id.
+- Response header: `X-Request-Id`.
+- Structured JSON logs are emitted for:
+  - catalog requests (`catalog_request`)
+  - media requests (`media_request`)
+  - media cache invalidation (`media_cache_invalidation`)
+
+Logs intentionally avoid secrets/tokens.
+
+## 7) Frontend Behavior
+- Uses backend catalog and media URLs directly.
+- Category tabs show image count badges.
+- Gallery uses Masonry layout.
+- Clicking an image opens a lightbox dialog with next/previous navigation.
+- Optional status panel (dev-only by default, or `VITE_SHOW_STATUS_PANEL=1`) shows API/debug info and has a refresh button that calls `?refresh=1`.
+
+## 8) Local Runbook
+
 ### Backend
 ```powershell
 cd backend
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend
 ```powershell
 cd frontend
+npm install
+copy .env.example .env
 npm run dev
 ```
 
-Open:
-- `http://localhost:5173`
+Local URLs:
+- Frontend: `http://localhost:5173`
+- Backend catalog: `http://localhost:8000/api/catalog`
 
-## 7) Known Limitation: Excel `#UNKNOWN!`
-If workbook content shows `#UNKNOWN!` or unsupported typed objects:
-- Those are often not standard embedded pictures.
-- They may not be extractable by `openpyxl`.
+## 9) Vercel Deployment Notes
+- Deploy as two projects:
+  - Backend root dir: `backend`
+  - Frontend root dir: `frontend`
+- Backend serverless entrypoint: `backend/api/index.py`
+- Vercel writable filesystem is `/tmp` only.
 
-Expected behavior:
-- Only real embedded worksheet images are extracted.
-- Affected sheets may appear with zero images.
-- API now adds notes/flags so zero-image categories are easier to interpret.
+Key backend env vars:
+- `SOURCE_MODE=local`
+- `LOCAL_XLSX_PATH=artwork.xlsx`
+- `CATALOG_CACHE_TTL_SECONDS=120`
+- `ALLOWED_ORIGINS=https://<frontend-domain>.vercel.app`
 
-Recommended fix:
-1. Replace unsupported objects with standard images.
-2. Reinsert via Excel: **Insert -> Pictures**.
-3. Save `.xlsx` and refresh.
+Key frontend env vars:
+- `VITE_API_BASE_URL=https://<backend-domain>.vercel.app/api`
+- `VITE_SHOW_STATUS_PANEL=0`
 
-## 8) Graph Cutover Checklist
-1. Keep `LOCAL_XLSX_PATH` for now.
-2. Obtain Graph app credentials and file identifiers.
-3. In `backend/.env`:
-   - Set Graph values.
-   - Clear `LOCAL_XLSX_PATH`.
-4. Restart backend.
-5. Verify `GET /api/catalog` returns expected categories and image URLs.
-
-## 9) Troubleshooting
-- Backend startup validation error:
-  - Ensure either local path is set OR complete Graph locator values are set.
-- `No categories`:
-  - Verify workbook path/file exists.
-  - Verify sheets contain real embedded images.
-- Frontend cannot load:
-  - Check `frontend/.env` has `VITE_API_BASE_URL=http://localhost:8000`.
-
-## 10) Vercel Deployment (v1)
-- Deploy as two Vercel projects:
-  - Backend root directory: `backend`
-  - Frontend root directory: `frontend`
-- Backend auto-detection entrypoint:
-  - `backend/app/app.py`
-- Recommended backend env for current source mode:
-  - `LOCAL_XLSX_PATH=artwork.xlsx`
-  - `ALLOWED_ORIGINS=https://<frontend-domain>.vercel.app`
-- Frontend env:
-  - `VITE_API_BASE_URL=https://<backend-domain>.vercel.app`
-- On Vercel, runtime-generated static media is written to `/tmp/static`.
+## 10) Known Limitations
+- Non-standard worksheet objects (for example cells showing `#UNKNOWN!`) may not be extractable through `openpyxl` image APIs.
+- In those cases categories may have zero extractable images and include diagnostic notes.

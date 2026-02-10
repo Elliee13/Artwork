@@ -12,7 +12,7 @@ export type CatalogResponse = {
 
 const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
 const TRIMMED_API_BASE_URL = RAW_API_BASE_URL.trim().replace(/\/+$/, "");
-const API_BASE_URL = TRIMMED_API_BASE_URL.endsWith("/api")
+export const API_BASE_URL = TRIMMED_API_BASE_URL.endsWith("/api")
   ? TRIMMED_API_BASE_URL
   : `${TRIMMED_API_BASE_URL}/api`;
 
@@ -39,8 +39,9 @@ export function toAbsoluteImageUrl(path: string): string {
   return joinUrl(API_ORIGIN, path);
 }
 
-export async function fetchCatalog(signal?: AbortSignal): Promise<CatalogCategory[]> {
-  const response = await fetch(joinUrl(API_BASE_URL, "/catalog"), {
+export async function fetchCatalog(signal?: AbortSignal, refresh = false): Promise<CatalogCategory[]> {
+  const catalogPath = refresh ? "/catalog?refresh=1" : "/catalog";
+  const response = await fetch(joinUrl(API_BASE_URL, catalogPath), {
     method: "GET",
     signal,
   });

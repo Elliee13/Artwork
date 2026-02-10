@@ -21,12 +21,26 @@ const useMeasure = <T extends HTMLElement>() => {
 
   useLayoutEffect(() => {
     if (!ref.current) return;
+    const updateSize = () => {
+      if (!ref.current) return;
+      const rect = ref.current.getBoundingClientRect();
+      setSize({ width: rect.width, height: rect.height });
+    };
+
+    // Ensure we always capture an initial size even if ResizeObserver
+    // doesn't fire immediately in some browser/layout timing cases.
+    updateSize();
+
     const ro = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
       setSize({ width, height });
     });
     ro.observe(ref.current);
-    return () => ro.disconnect();
+    window.addEventListener('resize', updateSize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
   }, []);
 
   return [ref, size] as const;
@@ -75,6 +89,7 @@ interface MasonryProps {
   hoverScale?: number;
   blurToFocus?: boolean;
   colorShiftOnHover?: boolean;
+  onItemClick?: (item: Item, index: number) => void;
 }
 
 const Masonry: React.FC<MasonryProps> = ({
@@ -87,7 +102,8 @@ const Masonry: React.FC<MasonryProps> = ({
   scaleOnHover = true,
   hoverScale = 1.015,
   blurToFocus = true,
-  colorShiftOnHover = false
+  colorShiftOnHover = false,
+  onItemClick
 }) => {
   const toTranslate3d = (x: number, y: number) => `translate3d(${x}px, ${y}px, 0)`;
   const columns = useMedia(
@@ -264,7 +280,7 @@ const Masonry: React.FC<MasonryProps> = ({
 
   return (
     <div ref={containerRef} className="relative w-full" style={{ height: containerHeight }}>
-      {gridLayout.items.map(item => (
+      {gridLayout.items.map((item, index) => (
         <div
           key={item.id}
           data-key={item.id}
@@ -275,12 +291,18 @@ const Masonry: React.FC<MasonryProps> = ({
             transform: toTranslate3d(item.x, item.y),
             willChange: 'transform, opacity'
           }}
-          onClick={() => openItemUrl(item.url)}
+          onClick={() => {
+            if (onItemClick) {
+              onItemClick(item, index);
+              return;
+            }
+            openItemUrl(item.url);
+          }}
           onMouseEnter={e => handleMouseEnter(item.id, e.currentTarget)}
           onMouseLeave={e => handleMouseLeave(item.id, e.currentTarget)}
         >
           <div
-            className="masonry-card relative h-full w-full overflow-hidden rounded-2xl bg-muted/30 ring-1 ring-border/20 shadow-[0_12px_28px_-22px_rgba(0,0,0,0.55)] md:rounded-3xl"
+            className="masonry-card relative h-full w-full overflow-hidden rounded-2xl bg-white/95 ring-1 ring-border/30 shadow-[0_12px_28px_-22px_rgba(0,0,0,0.55)] md:rounded-3xl"
           >
             <img
               src={item.img}

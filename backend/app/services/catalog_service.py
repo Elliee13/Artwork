@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import posixpath
 import re
 import tempfile
+import time
+import hashlib
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from io import BytesIO
@@ -20,6 +24,9 @@ from app.services.graph_client import GraphClient
 
 INVALID_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 DEFAULT_SHEET_PATTERN = re.compile(r"^Sheet\d*$", re.IGNORECASE)
+SAFE_CATEGORY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+MEDIA_CACHE_FILE_PATTERN = re.compile(r"^img_\d+\.(png|meta)$")
+GRAPH_SIGNATURE_BYTES = 65536
 
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -48,12 +55,72 @@ class SheetDiagnostics:
     extraction_failures: int = 0
 
 
+@dataclass
+class CatalogBuildResult:
+    categories: list[dict[str, object]]
+    workbook_source: str
+    workbook_identity: str
+    extraction_ms: int
+    total_ms: int
+    total_images: int
+    category_stats: list[dict[str, object]]
+
+
+@dataclass
+class MediaImageResult:
+    content: bytes
+    etag: str
+    cache_hit: bool
+    workbook_source: str
+    workbook_identity: str
+
+
 class CatalogService:
     def __init__(self, settings: Settings, graph_client: GraphClient | None) -> None:
         self.settings = settings
         self.graph_client = graph_client
         self.cache_root = Path(tempfile.gettempdir()) / "artwork_cache"
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        self._identity_marker_path = self.cache_root / ".workbook_identity"
+        self._last_built_workbook_identity: str | None = None
+
+    @staticmethod
+    def _workbook_identity_from_path(path: Path) -> str:
+        if not path.exists() or not path.is_file():
+            return f"{path}|missing"
+        stat = path.stat()
+        return f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
+
+    @staticmethod
+    def _graph_content_signature(path: Path) -> str | None:
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            with path.open("rb") as workbook_file:
+                chunk = workbook_file.read(GRAPH_SIGNATURE_BYTES)
+            return hashlib.sha1(chunk).hexdigest()[:16]
+        except OSError:
+            return None
+
+    def _compute_workbook_identity(self, path: Path) -> str:
+        base_identity = self._workbook_identity_from_path(path)
+        if self.settings.source_mode != "graph":
+            return base_identity
+
+        signature = self._graph_content_signature(path)
+        if not signature:
+            return base_identity
+        return f"{base_identity}|sig:{signature}"
+
+    def peek_workbook_identity(self) -> str:
+        if self.settings.source_mode == "graph":
+            graph_path = self._graph_tmp_workbook_path()
+            return self._compute_workbook_identity(graph_path)
+
+        local_path = self._resolve_local_xlsx_path()
+        if local_path is None:
+            return "local:missing"
+        return self._compute_workbook_identity(local_path)
 
     @staticmethod
     def _safe_sheet_dir_name(sheet_name: str) -> str:
@@ -264,26 +331,27 @@ class CatalogService:
 
         return (self.settings.base_dir / configured_path).resolve()
 
-    async def _load_workbook_bytes(self) -> bytes:
+    def _graph_tmp_workbook_path(self) -> Path:
+        if os.getenv("VERCEL"):
+            return Path("/tmp/artwork_graph.xlsx")
+        return Path(tempfile.gettempdir()) / "artwork_graph.xlsx"
+
+    async def _resolve_workbook_path(self) -> Path:
+        if self.settings.source_mode == "graph":
+            if self.graph_client is None:
+                raise RuntimeError("Graph client is not configured.")
+            workbook_bytes = await self.graph_client.download_excel_file()
+            graph_path = self._graph_tmp_workbook_path()
+            graph_path.parent.mkdir(parents=True, exist_ok=True)
+            graph_path.write_bytes(workbook_bytes)
+            return graph_path
+
         local_path = self._resolve_local_xlsx_path()
-        if local_path is not None:
-            if not local_path.exists() or not local_path.is_file():
-                raise FileNotFoundError(f"LOCAL_XLSX_PATH does not exist or is not a file: {local_path}")
-            return local_path.read_bytes()
-
-        has_graph_ref = bool(
-            (self.settings.graph_drive_id and self.settings.graph_item_id)
-            or (self.settings.graph_site_id and self.settings.graph_file_path)
-        )
-        if not has_graph_ref:
-            raise RuntimeError(
-                "No workbook source configured. Set LOCAL_XLSX_PATH or Graph file identifiers."
-            )
-
-        if self.graph_client is None:
-            raise RuntimeError("Graph client is not configured.")
-
-        return await self.graph_client.download_excel_file()
+        if local_path is None:
+            raise RuntimeError("No local workbook source configured. Set LOCAL_XLSX_PATH.")
+        if not local_path.exists() or not local_path.is_file():
+            raise FileNotFoundError(f"LOCAL_XLSX_PATH does not exist or is not a file: {local_path}")
+        return local_path
 
     @staticmethod
     def _parse_filename_index(filename: str) -> int | None:
@@ -311,17 +379,118 @@ class CatalogService:
     def _cache_path(self, category: str, filename: str) -> Path:
         return self.cache_root / category / filename
 
-    async def get_media_image(self, category: str, filename: str) -> bytes:
+    def _read_last_built_workbook_identity(self) -> str | None:
+        if self._last_built_workbook_identity:
+            return self._last_built_workbook_identity
+        if not self._identity_marker_path.exists() or not self._identity_marker_path.is_file():
+            return None
+        value = self._identity_marker_path.read_text(encoding="utf-8").strip()
+        if not value:
+            return None
+        self._last_built_workbook_identity = value
+        return value
+
+    def _store_last_built_workbook_identity(self, workbook_identity: str) -> None:
+        self._last_built_workbook_identity = workbook_identity
+        self._identity_marker_path.write_text(workbook_identity, encoding="utf-8")
+
+    def _invalidate_stale_media_cache(self, old_identity: str | None, new_identity: str) -> list[str]:
+        if not old_identity or old_identity == new_identity:
+            return []
+
+        cleaned_dirs: list[str] = []
+        removed_png_count = 0
+        removed_meta_count = 0
+        for child in self.cache_root.iterdir():
+            if not child.is_dir() or not SAFE_CATEGORY_PATTERN.fullmatch(child.name):
+                continue
+
+            removed_in_dir = False
+            for file_path in child.iterdir():
+                if not file_path.is_file():
+                    continue
+                if not MEDIA_CACHE_FILE_PATTERN.fullmatch(file_path.name):
+                    continue
+                file_path.unlink(missing_ok=True)
+                removed_in_dir = True
+                if file_path.suffix == ".png":
+                    removed_png_count += 1
+                else:
+                    removed_meta_count += 1
+
+            if removed_in_dir:
+                cleaned_dirs.append(child.name)
+                # Remove category dir only if no unrelated files remain.
+                try:
+                    next(child.iterdir())
+                except StopIteration:
+                    try:
+                        child.rmdir()
+                    except OSError:
+                        pass
+
+        logger.info(
+            json.dumps(
+                {
+                    "event": "media_cache_invalidation",
+                    "old_identity": old_identity,
+                    "new_identity": new_identity,
+                    "cleaned_category_dirs": cleaned_dirs if cleaned_dirs else "none",
+                    "images_removed": removed_png_count,
+                    "meta_removed": removed_meta_count,
+                },
+                separators=(",", ":"),
+            )
+        )
+        return cleaned_dirs
+
+    @staticmethod
+    def _cache_meta_path(cache_path: Path) -> Path:
+        return cache_path.with_suffix(".meta")
+
+    @staticmethod
+    def _read_cached_identity(cache_meta_path: Path) -> str | None:
+        if not cache_meta_path.exists() or not cache_meta_path.is_file():
+            return None
+        return cache_meta_path.read_text(encoding="utf-8").strip() or None
+
+    @staticmethod
+    def _write_cached_identity(cache_meta_path: Path, workbook_identity: str) -> None:
+        cache_meta_path.write_text(workbook_identity, encoding="utf-8")
+
+    @staticmethod
+    def _build_media_etag(cache_path: Path, workbook_identity: str, filename: str) -> str:
+        stat = cache_path.stat()
+        etag_seed = f"{workbook_identity}|{filename}"
+        workbook_hash = hashlib.sha1(etag_seed.encode("utf-8")).hexdigest()[:16]
+        return f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}-{workbook_hash}"'
+
+    async def get_media_image(self, category: str, filename: str) -> MediaImageResult:
+        if not SAFE_CATEGORY_PATTERN.fullmatch(category):
+            raise FileNotFoundError("Invalid media category.")
+
         image_index = self._parse_filename_index(filename)
         if image_index is None:
             raise FileNotFoundError("Invalid media filename.")
 
         cache_path = self._cache_path(category, filename)
-        if cache_path.exists() and cache_path.is_file():
-            return cache_path.read_bytes()
+        cache_meta_path = self._cache_meta_path(cache_path)
+        current_identity = self.peek_workbook_identity()
 
-        workbook_bytes = await self._load_workbook_bytes()
-        workbook = load_workbook(filename=BytesIO(workbook_bytes), data_only=True)
+        if cache_path.exists() and cache_path.is_file():
+            cached_identity = self._read_cached_identity(cache_meta_path)
+            if cached_identity and cached_identity == current_identity:
+                return MediaImageResult(
+                    content=cache_path.read_bytes(),
+                    etag=self._build_media_etag(cache_path, cached_identity, filename),
+                    cache_hit=True,
+                    workbook_source=cached_identity.split("|", 1)[0],
+                    workbook_identity=cached_identity,
+                )
+
+        workbook_path = await self._resolve_workbook_path()
+        workbook_identity = self._compute_workbook_identity(workbook_path)
+        workbook = load_workbook(filename=workbook_path, data_only=True)
 
         try:
             worksheet = self._resolve_sheet_by_category(workbook, category)
@@ -345,77 +514,108 @@ class CatalogService:
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(png_bytes)
-        return png_bytes
+        self._write_cached_identity(cache_meta_path, workbook_identity)
+        return MediaImageResult(
+            content=png_bytes,
+            etag=self._build_media_etag(cache_path, workbook_identity, filename),
+            cache_hit=False,
+            workbook_source=str(workbook_path),
+            workbook_identity=workbook_identity,
+        )
 
-    async def build_catalog(self) -> list[dict[str, object]]:
-        workbook_bytes = await self._load_workbook_bytes()
+    async def build_catalog_result(self) -> CatalogBuildResult:
+        started_at = time.perf_counter()
+        workbook_path = await self._resolve_workbook_path()
+        workbook_identity = self._compute_workbook_identity(workbook_path)
+        workbook_bytes = workbook_path.read_bytes()
+
+        extraction_started_at = time.perf_counter()
         package_diagnostics_by_sheet, unmapped_media_count = self._analyze_xlsx_package(workbook_bytes)
 
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        previous_identity = self._read_last_built_workbook_identity()
+        self._invalidate_stale_media_cache(previous_identity, workbook_identity)
+        self._store_last_built_workbook_identity(workbook_identity)
 
-        workbook = load_workbook(filename=BytesIO(workbook_bytes), data_only=True)
+        workbook = load_workbook(filename=workbook_path, data_only=True)
         categories: list[dict[str, object]] = []
+        category_stats: list[dict[str, object]] = []
+        total_images = 0
         used_sheet_dirs: set[str] = set()
 
-        for worksheet in workbook.worksheets:
-            if self._should_ignore_sheet(worksheet.title):
-                logger.debug("Skipping default worksheet '%s' from catalog", worksheet.title)
-                continue
+        try:
+            for worksheet in workbook.worksheets:
+                if self._should_ignore_sheet(worksheet.title):
+                    logger.debug("Skipping default worksheet '%s' from catalog", worksheet.title)
+                    continue
 
-            safe_sheet_name = self._resolve_unique_dir_name(
-                self._safe_sheet_dir_name(worksheet.title),
-                used_sheet_dirs,
-            )
-            sheet_dir = self.cache_root / safe_sheet_name
-            sheet_dir.mkdir(parents=True, exist_ok=True)
+                safe_sheet_name = self._resolve_unique_dir_name(
+                    self._safe_sheet_dir_name(worksheet.title),
+                    used_sheet_dirs,
+                )
+                sheet_dir = self.cache_root / safe_sheet_name
+                sheet_dir.mkdir(parents=True, exist_ok=True)
 
-            diagnostics = package_diagnostics_by_sheet.get(worksheet.title, SheetDiagnostics())
-            diagnostics.unknown_error_cells = self._count_unknown_error_cells(worksheet)
+                diagnostics = package_diagnostics_by_sheet.get(worksheet.title, SheetDiagnostics())
+                diagnostics.unknown_error_cells = self._count_unknown_error_cells(worksheet)
 
-            images = getattr(worksheet, "_images", [])
-            image_urls: list[str] = []
+                images = getattr(worksheet, "_images", [])
+                image_urls: list[str] = []
 
-            for idx, image in enumerate(images, start=1):
-                try:
-                    output_path = sheet_dir / f"img_{idx}.png"
-                    raw_bytes = image._data()
-                    self._save_as_png(raw_bytes, output_path)
-                    image_urls.append(f"/api/media/{quote(safe_sheet_name)}/img_{idx}.png")
-                except Exception as exc:
-                    diagnostics.extraction_failures += 1
-                    logger.warning(
-                        "Image extraction failed for sheet '%s' image #%s: %s",
-                        worksheet.title,
-                        idx,
-                        exc,
-                    )
+                for idx, image in enumerate(images, start=1):
+                    try:
+                        output_path = sheet_dir / f"img_{idx}.png"
+                        raw_bytes = image._data()
+                        self._save_as_png(raw_bytes, output_path)
+                        image_urls.append(f"/api/media/{quote(safe_sheet_name)}/img_{idx}.png")
+                    except Exception as exc:
+                        diagnostics.extraction_failures += 1
+                        logger.warning(
+                            "Image extraction failed for sheet '%s' image #%s: %s",
+                            worksheet.title,
+                            idx,
+                            exc,
+                        )
 
-            images_count = len(image_urls)
-            unsupported_count = self._unsupported_objects_count(images_count, diagnostics)
-            notes = self._build_notes(images_count, diagnostics)
+                images_count = len(image_urls)
+                total_images += images_count
+                unsupported_count = self._unsupported_objects_count(images_count, diagnostics)
+                notes = self._build_notes(images_count, diagnostics)
 
-            logger.info(
-                "Catalog sheet '%s': extracted_images=%s drawing_objects=%s drawing_pictures=%s "
-                "unknown_error_cells=%s extraction_failures=%s unsupported_detected=%s note=%s",
-                worksheet.title,
-                images_count,
-                diagnostics.drawing_objects,
-                diagnostics.drawing_pictures,
-                diagnostics.unknown_error_cells,
-                diagnostics.extraction_failures,
-                unsupported_count > 0,
-                notes or "-",
-            )
+                logger.info(
+                    "Catalog sheet '%s': extracted_images=%s drawing_objects=%s drawing_pictures=%s "
+                    "unknown_error_cells=%s extraction_failures=%s unsupported_detected=%s note=%s",
+                    worksheet.title,
+                    images_count,
+                    diagnostics.drawing_objects,
+                    diagnostics.drawing_pictures,
+                    diagnostics.unknown_error_cells,
+                    diagnostics.extraction_failures,
+                    unsupported_count > 0,
+                    notes or "-",
+                )
 
-            categories.append(
-                {
-                    "name": worksheet.title,
-                    "images": image_urls,
-                    "images_count": images_count,
-                    "unsupported_objects_detected": unsupported_count > 0,
-                    "notes": notes,
-                }
-            )
+                category_stats.append(
+                    {
+                        "name": worksheet.title,
+                        "images_count": images_count,
+                        "unsupported_objects_detected": unsupported_count > 0,
+                    }
+                )
+
+                categories.append(
+                    {
+                        "name": worksheet.title,
+                        "images": image_urls,
+                        "images_count": images_count,
+                        "unsupported_objects_detected": unsupported_count > 0,
+                        "notes": notes,
+                    }
+                )
+        finally:
+            close = getattr(workbook, "close", None)
+            if callable(close):
+                close()
 
         if unmapped_media_count > 0:
             # ZIP fallback signal: media files exist in package without clear sheet mapping.
@@ -424,4 +624,17 @@ class CatalogService:
                 unmapped_media_count,
             )
 
-        return categories
+        extraction_ms = int((time.perf_counter() - extraction_started_at) * 1000)
+        total_ms = int((time.perf_counter() - started_at) * 1000)
+        return CatalogBuildResult(
+            categories=categories,
+            workbook_source=str(workbook_path),
+            workbook_identity=workbook_identity,
+            extraction_ms=extraction_ms,
+            total_ms=total_ms,
+            total_images=total_images,
+            category_stats=category_stats,
+        )
+
+    async def build_catalog(self) -> list[dict[str, object]]:
+        return (await self.build_catalog_result()).categories

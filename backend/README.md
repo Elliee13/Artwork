@@ -15,14 +15,30 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Use one of these source definitions in `.env`:
 
-1. Temporary local mode: `LOCAL_XLSX_PATH`
-2. Graph mode: `GRAPH_DRIVE_ID` + `GRAPH_ITEM_ID`
-3. Graph mode: `GRAPH_SITE_ID` + `GRAPH_FILE_PATH`
+1. Local mode (default):
+   - `SOURCE_MODE=local`
+   - `LOCAL_XLSX_PATH=artwork.xlsx`
+2. Graph mode:
+   - `SOURCE_MODE=graph`
+   - Credentials: `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`
+   - File locator (preferred): `MS_FILE_URL`
+   - File locator (alternate): `MS_DRIVE_ID` + `MS_ITEM_ID`
 
-If `LOCAL_XLSX_PATH` is set, backend reads that workbook directly.
-If `LOCAL_XLSX_PATH` is empty, backend uses Microsoft Graph and downloads the latest workbook on each `GET /api/catalog` request.
+In graph mode, the backend downloads the workbook and writes it to a temp file
+before running the existing extraction pipeline.
 
 In both modes, the API parses sheets as categories, extracts embedded images, and serves them via `/static`.
+
+## Graph health check
+
+- `GET /health/graph`
+- `GET /api/health/graph`
+
+Possible responses:
+- `{"mode":"local","status":"disabled"}`
+- `{"mode":"graph","status":"missing_config","missing":[...]}`
+- `{"mode":"graph","status":"ok","bytes":12345}`
+- `{"mode":"graph","status":"error","error":"..."}`
 
 ## Vercel
 

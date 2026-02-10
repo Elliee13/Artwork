@@ -38,15 +38,16 @@ export default function CategoryHeader({
   }, [categoryName]);
 
   return (
-    <div ref={headerRef} className="space-y-2.5 text-center">
-      <h2 className="text-3xl font-semibold leading-[1.05] tracking-tight text-foreground/95 sm:text-4xl lg:text-[44px]">
+    <div ref={headerRef} className="mx-auto max-w-[900px] space-y-2.5 text-center">
+      <p className="font-sans text-[11px] uppercase tracking-[0.22em] text-muted-foreground/70">Current Category</p>
+      <h2 className="text-center font-display text-2xl font-semibold leading-tight tracking-[-0.025em] text-balance text-foreground/95 sm:text-3xl">
         {categoryName || "Gallery"}
       </h2>
-      <p className="mt-2 text-sm font-normal leading-relaxed text-muted-foreground sm:text-base">
+      <p className="mt-2 font-sans text-sm font-normal leading-relaxed text-muted-foreground sm:text-base">
         {imagesCount} {imagesCount === 1 ? "image" : "images"}
       </p>
       {unsupportedObjectsDetected ? (
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground/80 sm:text-sm">
+        <p className="mt-2 font-sans text-xs leading-relaxed text-muted-foreground/80 sm:text-sm">
           Some worksheet objects may not be standard embedded images.
         </p>
       ) : null}

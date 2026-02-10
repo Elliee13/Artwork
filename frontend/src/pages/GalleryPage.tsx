@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import CategoryHeader from "@/components/catalog/CategoryHeader";
 import CategoryTabs from "@/components/catalog/CategoryTabs";
 import ImageGrid from "@/components/catalog/ImageGrid";
 import AppLayout from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
-import { fetchCatalog, toAbsoluteImageUrl, type CatalogCategory } from "@/services/catalogApi";
+import { API_BASE_URL, fetchCatalog, toAbsoluteImageUrl, type CatalogCategory } from "@/services/catalogApi";
 
 type CatalogCategoryView = CatalogCategory & {
   images_count?: number;
@@ -19,16 +19,17 @@ export default function GalleryPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
+  const [statusPanelOpen, setStatusPanelOpen] = useState(false);
+  const showStatusPanel = import.meta.env.DEV || import.meta.env.VITE_SHOW_STATUS_PANEL === "1";
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function loadCatalog() {
+  const loadCatalog = useCallback(
+    async (signal: AbortSignal, forceRefresh = false) => {
       setIsLoading(true);
       setError(null);
 
       try {
-        const fetchedCategories = await fetchCatalog(controller.signal);
+        const fetchedCategories = await fetchCatalog(signal, forceRefresh);
         // Backward-safe normalization: frontend remains compatible if fields are absent.
         const normalized = fetchedCategories.map((category) => {
           const unsafeCategory = category as CatalogCategoryView;
@@ -43,6 +44,7 @@ export default function GalleryPage() {
           };
         });
         setCategories(normalized);
+        setLastFetchedAt(new Date());
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           setError("Failed to load artwork catalog.");
@@ -50,12 +52,16 @@ export default function GalleryPage() {
       } finally {
         setIsLoading(false);
       }
-    }
+    },
+    []
+  );
 
-    loadCatalog();
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadCatalog(controller.signal, refreshTick > 0);
 
     return () => controller.abort();
-  }, [refreshTick]);
+  }, [refreshTick, loadCatalog]);
 
   useEffect(() => {
     if (categories.length === 0) {
@@ -80,10 +86,14 @@ export default function GalleryPage() {
   const imagesCount = activeData?.images_count ?? images.length;
   const unsupportedObjectsDetected = Boolean(activeData?.unsupported_objects_detected);
   const notes = activeData?.notes ?? null;
+  const totalImages = useMemo(
+    () => categories.reduce((sum, category) => sum + (category.images_count ?? category.images.length), 0),
+    [categories]
+  );
 
   return (
     <AppLayout subtitle="Select a category to view all artwork.">
-      <section className="space-y-8 sm:space-y-10 lg:space-y-12">
+      <section className="space-y-6 sm:space-y-8 lg:space-y-10">
         {error ? (
           <div className="flex items-center justify-between gap-3 rounded-2xl border border-border/50 bg-muted/30 p-4 text-sm text-foreground">
             <span>{error}</span>
@@ -103,7 +113,7 @@ export default function GalleryPage() {
             No categories found.
           </div>
         ) : (
-          <div className="space-y-5 sm:space-y-6 lg:space-y-8">
+          <div className="space-y-6 sm:space-y-8 lg:space-y-10">
             <CategoryHeader
               key={activeCategory || "catalog-header"}
               categoryName={activeCategory || "Gallery"}
@@ -111,7 +121,10 @@ export default function GalleryPage() {
               unsupportedObjectsDetected={unsupportedObjectsDetected}
             />
             <CategoryTabs
-              categories={categories.map((category) => category.name)}
+              categories={categories.map((category) => ({
+                name: category.name,
+                imagesCount: category.images_count ?? category.images.length,
+              }))}
               activeCategory={activeCategory}
               onChange={setActiveCategory}
             />
@@ -126,6 +139,50 @@ export default function GalleryPage() {
           </div>
         )}
       </section>
+      {showStatusPanel ? (
+        <div className="fixed bottom-4 right-4 z-40 w-[min(90vw,340px)] rounded-2xl border border-border/60 bg-background/95 p-3 shadow-lg backdrop-blur">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium text-foreground">Status</p>
+            <div className="flex items-center gap-2">
+              <Button type="button" size="sm" variant="secondary" onClick={() => setRefreshTick((v) => v + 1)}>
+                Refresh Catalog
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => setStatusPanelOpen((open) => !open)}
+              >
+                {statusPanelOpen ? "Hide" : "Show"}
+              </Button>
+            </div>
+          </div>
+          {statusPanelOpen ? (
+            <dl className="mt-3 space-y-1 text-xs text-muted-foreground">
+              <div className="flex justify-between gap-2">
+                <dt>API Base</dt>
+                <dd className="truncate text-right">{API_BASE_URL}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt>Last Fetch</dt>
+                <dd>{lastFetchedAt ? lastFetchedAt.toLocaleTimeString() : "N/A"}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt>Categories</dt>
+                <dd>{categories.length}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt>Total Images</dt>
+                <dd>{totalImages}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt>Active Category</dt>
+                <dd className="truncate text-right">{activeCategory || "-"}</dd>
+              </div>
+            </dl>
+          ) : null}
+        </div>
+      ) : null}
     </AppLayout>
   );
 }

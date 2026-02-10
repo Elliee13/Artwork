@@ -1,6 +1,14 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import Masonry from "@/components/Masonry";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -37,6 +45,8 @@ export default function ImageGrid({
   unsupportedObjectsDetected,
   notes,
 }: ImageGridProps) {
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
   const masonryItems = useMemo<MasonryItem[]>(
     () =>
       imageUrls.map((url, index) => ({
@@ -47,6 +57,38 @@ export default function ImageGrid({
       })),
     [categoryName, imageUrls]
   );
+
+  const lightboxOpen = lightboxIndex !== null;
+  const activeIndex = lightboxIndex ?? 0;
+  const activeItem = masonryItems[activeIndex];
+
+  useEffect(() => {
+    if (!lightboxOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "ArrowRight") {
+        setLightboxIndex((prev) => {
+          if (prev === null) return prev;
+          return (prev + 1) % masonryItems.length;
+        });
+      }
+      if (event.key === "ArrowLeft") {
+        setLightboxIndex((prev) => {
+          if (prev === null) return prev;
+          return (prev - 1 + masonryItems.length) % masonryItems.length;
+        });
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [lightboxOpen, masonryItems.length]);
+
+  useEffect(() => {
+    setLightboxIndex(null);
+  }, [categoryName]);
 
   if (isLoading) {
     return (
@@ -63,14 +105,16 @@ export default function ImageGrid({
 
   if (imagesCount === 0) {
     return (
-      <div className="space-y-3 rounded-3xl border border-border/50 bg-muted/20 p-8 sm:p-10 lg:p-12">
-        <h3 className="text-lg font-semibold tracking-tight text-foreground sm:text-xl">
+      <div className="space-y-3 rounded-3xl border border-border/40 bg-muted/15 p-8 sm:p-10 lg:p-12">
+        <h3 className="font-display text-balance text-xl font-semibold leading-tight tracking-[-0.02em] text-foreground sm:text-2xl">
           No extractable artwork in this category yet.
         </h3>
-        {notes ? <p className="max-w-prose text-sm leading-relaxed text-muted-foreground">{notes}</p> : null}
+        {notes ? (
+          <p className="max-w-prose font-sans text-pretty text-sm leading-relaxed text-muted-foreground">{notes}</p>
+        ) : null}
         <Separator className="bg-border/60" />
         {unsupportedObjectsDetected ? (
-          <p className="text-xs text-muted-foreground/80 sm:text-sm">
+          <p className="font-sans text-xs text-muted-foreground/80 sm:text-sm">
             Some worksheet objects may be non-standard and not available as embedded images.
           </p>
         ) : null}
@@ -95,7 +139,54 @@ export default function ImageGrid({
         duration={0.75}
         stagger={0.04}
         initialDelay={0.32}
+        onItemClick={(item, index) => {
+          if (item.url && item.url !== "noop") {
+            window.open(item.url, "_blank", "noopener");
+            return;
+          }
+          setLightboxIndex(index);
+        }}
       />
+      <Dialog open={lightboxOpen} onOpenChange={(open) => (open ? setLightboxIndex(activeIndex) : setLightboxIndex(null))}>
+        <DialogContent className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <DialogTitle>{categoryName || "Gallery"}</DialogTitle>
+            <DialogDescription>
+              {masonryItems.length === 0 ? "0/0" : `${activeIndex + 1}/${masonryItems.length}`}
+            </DialogDescription>
+          </div>
+          {activeItem ? (
+            <div className="flex h-[75vh] items-center justify-center overflow-hidden rounded-xl bg-white/95">
+              <img src={activeItem.img} alt="" className="max-h-full w-auto max-w-full object-contain" />
+            </div>
+          ) : null}
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() =>
+                setLightboxIndex((prev) => (prev === null ? prev : (prev - 1 + masonryItems.length) % masonryItems.length))
+              }
+              disabled={masonryItems.length === 0}
+            >
+              Previous
+            </Button>
+            <DialogClose asChild>
+              <Button type="button" variant="secondary">
+                Close
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setLightboxIndex((prev) => (prev === null ? prev : (prev + 1) % masonryItems.length))}
+              disabled={masonryItems.length === 0}
+            >
+              Next
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
